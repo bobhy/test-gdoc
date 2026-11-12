@@ -20,5 +20,5 @@ export interface WasmBridgeApi {
 /** Window extension exposing the Go runtime constructor and plugin Wasm bridge. */
 export interface WasmWindowGlobals {
 	Go?: GoRuntimeConstructor;
-	__gotestWasm?: WasmBridgeApi;
+	__samplegoplugin?: WasmBridgeApi;
 }

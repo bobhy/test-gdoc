@@ -11,7 +11,7 @@ import (
 	"sample-go-plugin/go/settings"
 )
 
-const globalNamespace = "__gotestWasm"
+const globalNamespace = "__samplegoplugin"
 
 type errorResponse struct {
 	Error string `json:"error"`

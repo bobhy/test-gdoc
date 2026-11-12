@@ -21,7 +21,7 @@ This is a sample plugin for [Obsidian](https://obsidian.md) that demonstrates ho
 ├── go/
 │   ├── cmd/
 │   │   ├── gents/          # Code generator: Go structs + defaults → src/settings.generated.ts
-│   │   └── plugin/         # Go Wasm entrypoint (js/wasm) exporting callbacks on window.__gotestWasm
+│   │   └── plugin/         # Go Wasm entrypoint (js/wasm) exporting callbacks on window.__samplegoplugin
 │   └── settings/           # Canonical PluginSettings, ActionResult, RunAction, and Go unit tests
 ├── src/
 │   ├── main.ts             # Obsidian plugin lifecycle (onload, onunload, command & ribbon registration)
@@ -63,6 +63,20 @@ This is a sample plugin for [Obsidian](https://obsidian.md) that demonstrates ho
    ```
 
 > **Note on watch mode (`npm run dev`)**: `npm run dev` runs `npm run build:wasm` once before starting esbuild's TypeScript watcher. After editing files under `go/`, run `npm run build:wasm` in another terminal to regenerate `src/settings.generated.ts` and `build/plugin.wasm`—esbuild will automatically pick up the updated files and rebuild `main.js`.
+
+## Starting your own plugin from this sample
+
+To use this repository as the base for a new plugin while keeping the ability to merge future fixes and enhancements from it, clone with shared Git history and keep this repo as a `sample-base` remote:
+
+```sh
+git clone <sample-go-plugin-url> my-obsidian-plugin
+cd my-obsidian-plugin
+git remote rename origin sample-base
+git remote add origin <my-obsidian-plugin-url>
+git push -u origin main
+```
+
+In your new plugin, update `manifest.json` and `package.json`, and rename `__samplegoplugin` (in `go/cmd/plugin/main.go`, `src/wasm/types.ts`, and `src/wasm/bridge.ts`) to a unique identifier so multiple Go/Wasm plugins do not collide on `window`. Later, you can pull upstream improvements into your plugin with `git fetch sample-base && git merge sample-base/main` (or `git cherry-pick <commit-sha>` for individual fixes).
 
 ## Available scripts
 

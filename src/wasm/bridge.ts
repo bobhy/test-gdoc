@@ -37,7 +37,7 @@ export class GoWasmBridge {
 	 * Shuts down the Go Wasm runtime and releases registered JS callbacks.
 	 */
 	unload(): void {
-		wasmGlobals().__gotestWasm?.shutdown();
+		wasmGlobals().__samplegoplugin?.shutdown();
 		this.readyPromise = null;
 	}
 
@@ -74,7 +74,7 @@ export class GoWasmBridge {
 async function waitForBridge(timeoutMs: number): Promise<WasmBridgeApi> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
-		const api = wasmGlobals().__gotestWasm;
+		const api = wasmGlobals().__samplegoplugin;
 		if (api) {
 			return api;
 		}
