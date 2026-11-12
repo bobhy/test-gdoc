@@ -1,0 +1,29 @@
+{
+	"name": "sample-go-plugin",
+	"version": "1.0.0",
+	"description": "Sample plugin for Obsidian (https://obsidian.md) demonstrating use of Go/WebAssembly and TypeScript.",
+	"main": "main.js",
+	"type": "module",
+	"scripts": {
+		"build:wasm": "mkdir -p build && go run ./go/cmd/gents && GOOS=js GOARCH=wasm go build -ldflags=\"-s -w\" -o build/plugin.wasm ./go/cmd/plugin && cp \"$(go env GOROOT)/lib/wasm/wasm_exec.js\" build/wasm_exec.js",
+		"dev": "npm run build:wasm && node esbuild.config.mjs",
+		"build": "npm run build:wasm && tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"version": "node version-bump.mjs && git add manifest.json versions.json",
+		"lint": "eslint .",
+		"test:go": "go test ./go/..."
+	},
+	"keywords": [],
+	"license": "0-BSD",
+	"devDependencies": {
+		"@eslint/js": "^9.39.4",
+		"@types/node": "^22.15.17",
+		"esbuild": "0.25.5",
+		"eslint": "^9.39.4",
+		"eslint-plugin-obsidianmd": "^0.4.0",
+		"globals": "^17.6.0",
+		"jiti": "^2.6.1",
+		"obsidian": "^1.14.4",
+		"typescript": "^5.8.3",
+		"typescript-eslint": "^8.59.1"
+	}
+}
