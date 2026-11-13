@@ -2,8 +2,8 @@
  * Settings tab and re-exported Go-backed settings types for the plugin.
  */
 
-import { App, PluginSettingTab, type SettingDefinitionItem } from 'obsidian';
-import type GoWasmPlugin from './main';
+import { App, Notice, PluginSettingTab, type SettingDefinitionItem } from 'obsidian';
+import type TestGdocPlugin from './main';
 import {
 	DEFAULT_SETTINGS,
 	type PluginSettings,
@@ -13,13 +13,13 @@ export { DEFAULT_SETTINGS, type PluginSettings };
 
 /**
  * Obsidian settings tab exposing the shared Go `PluginSettings` struct
- * and a button to invoke the Go WebAssembly action routine.
+ * and Google Drive OAuth login/logout controls.
  */
 export class GoWasmSettingTab extends PluginSettingTab {
-	private readonly plugin: GoWasmPlugin;
+	private readonly plugin: TestGdocPlugin;
 
 	/** Creates the settings tab bound to the active plugin instance. */
-	constructor(app: App, plugin: GoWasmPlugin) {
+	constructor(app: App, plugin: TestGdocPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -29,47 +29,67 @@ export class GoWasmSettingTab extends PluginSettingTab {
 	 * and indexed in global settings search).
 	 */
 	getSettingDefinitions(): SettingDefinitionItem<keyof PluginSettings>[] {
+		const isAuthenticated = this.plugin.oauth.isAuthenticated;
+
 		return [
 			{
-				name: 'Greeting prefix',
-				desc: 'Text passed to the compiled action routine.',
-				control: {
-					type: 'text',
-					key: 'greetingPrefix',
-					placeholder: DEFAULT_SETTINGS.greetingPrefix,
+				name: 'Google Drive account',
+				desc: isAuthenticated
+					? 'Connected to Google Drive via vault-share relay.'
+					: 'Sign in with Google to authorize Drive file access.',
+				render: (setting) => {
+					setting.addButton((button) => {
+						button
+							.setButtonText(isAuthenticated ? 'Log out' : 'Log in')
+							.setCta()
+							.onClick(async () => {
+								if (this.plugin.oauth.isAuthenticated) {
+									await this.plugin.logoutFromDrive();
+									this.update();
+								} else {
+									this.plugin.startDriveLogin();
+									new Notice('Complete Google sign-in in your browser.');
+								}
+							});
+					});
 				},
 			},
 			{
-				name: 'Repeat count',
-				desc: 'Number of times the greeting repeats (1 to 10).',
+				name: 'Drive folder path',
+				desc: 'Remote Google Drive folder path for flat Markdown and text files.',
+				control: {
+					type: 'text',
+					key: 'driveFolderPath',
+					placeholder: DEFAULT_SETTINGS.driveFolderPath,
+				},
+			},
+			{
+				name: 'Local sync folder',
+				desc: 'Vault folder storing synced flat Markdown and text files.',
+				control: {
+					type: 'text',
+					key: 'localSyncFolderPath',
+					placeholder: DEFAULT_SETTINGS.localSyncFolderPath,
+				},
+			},
+			{
+				name: 'Base snapshot folder',
+				desc: 'Vault folder holding user-managed base snapshots for 3-way merge.',
+				control: {
+					type: 'text',
+					key: 'baseSnapshotFolderPath',
+					placeholder: DEFAULT_SETTINGS.baseSnapshotFolderPath,
+				},
+			},
+			{
+				name: 'Max concurrent requests',
+				desc: 'Maximum simultaneous Drive requests enforced in Go (1 to 10).',
 				control: {
 					type: 'slider',
-					key: 'repeatCount',
+					key: 'maxPendingRequests',
 					min: 1,
 					max: 10,
 					step: 1,
-				},
-			},
-			{
-				name: 'Uppercase',
-				desc: 'Convert the formatted greeting to uppercase.',
-				control: {
-					type: 'toggle',
-					key: 'uppercase',
-				},
-			},
-			{
-				name: 'Go action',
-				desc: 'Invoke the compiled action routine with the current settings.',
-				render: (setting) => {
-					setting.addButton((button) =>
-						button
-							.setButtonText('Run')
-							.setCta()
-							.onClick(async () => {
-								await this.plugin.runGoAction();
-							}),
-					);
 				},
 			},
 		];

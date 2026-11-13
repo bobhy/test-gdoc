@@ -1,8 +1,76 @@
-/*
+.test-gdoc-drive-view {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	height: 100%;
+	padding: 0.75rem;
+}
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.test-gdoc-header {
+	display: flex;
+	flex-direction: column;
+	gap: 0.4rem;
+}
 
-If your plugin does not need CSS, delete this file.
+.test-gdoc-actions {
+	display: flex;
+	gap: 0.5rem;
+	flex-wrap: wrap;
+}
 
-*/
+.test-gdoc-status {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.test-gdoc-body {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	flex: 1;
+	min-height: 0;
+}
+
+.test-gdoc-file-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.35rem;
+	max-height: 160px;
+	overflow-y: auto;
+}
+
+.test-gdoc-file-item.is-selected {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.test-gdoc-editor-pane {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	flex: 1;
+	min-height: 0;
+}
+
+.test-gdoc-editor-bar {
+	display: flex;
+	gap: 0.5rem;
+	align-items: center;
+}
+
+.test-gdoc-filename-input {
+	flex: 1;
+}
+
+.test-gdoc-textarea {
+	flex: 1;
+	min-height: 220px;
+	width: 100%;
+	resize: vertical;
+	font-family: var(--font-monospace);
+}
+
+.test-gdoc-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}

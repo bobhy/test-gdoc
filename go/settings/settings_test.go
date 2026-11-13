@@ -2,7 +2,6 @@ package settings
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -22,48 +21,77 @@ func TestDefaultSettingsJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestRunAction(t *testing.T) {
+func TestNormalizeSettings(t *testing.T) {
 	tests := []struct {
-		name     string
-		cfg      PluginSettings
-		wantText string
+		name string
+		in   PluginSettings
+		want PluginSettings
 	}{
 		{
-			name:     "defaults",
-			cfg:      DefaultSettings(),
-			wantText: "Hello from Go Wasm",
+			name: "defaults unchanged",
+			in:   DefaultSettings(),
+			want: DefaultSettings(),
 		},
 		{
-			name: "repeated and uppercase",
-			cfg: PluginSettings{
-				GreetingPrefix: "ping",
-				RepeatCount:    3,
-				Uppercase:      true,
+			name: "empty strings and non-positive maxPendingRequests fall back to defaults",
+			in: PluginSettings{
+				DriveFolderPath:        "   ",
+				LocalSyncFolderPath:    "",
+				BaseSnapshotFolderPath: "\t",
+				MaxPendingRequests:     0,
 			},
-			wantText: "PING | PING | PING",
+			want: DefaultSettings(),
 		},
 		{
-			name: "empty prefix and out-of-range count",
-			cfg: PluginSettings{
-				GreetingPrefix: "   ",
-				RepeatCount:    0,
+			name: "clamps high maxPendingRequests",
+			in: PluginSettings{
+				DriveFolderPath:        "/custom",
+				LocalSyncFolderPath:    "local",
+				BaseSnapshotFolderPath: "base",
+				MaxPendingRequests:     99,
 			},
-			wantText: "Hello from Go Wasm",
+			want: PluginSettings{
+				DriveFolderPath:        "/custom",
+				LocalSyncFolderPath:    "local",
+				BaseSnapshotFolderPath: "base",
+				MaxPendingRequests:     10,
+			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res := RunAction(tc.cfg)
-			if !strings.HasPrefix(res.Message, tc.wantText) {
-				t.Errorf("Message = %q, want prefix %q", res.Message, tc.wantText)
-			}
-			if res.GoVersion == "" {
-				t.Error("GoVersion should not be empty")
-			}
-			if res.Platform == "" {
-				t.Error("Platform should not be empty")
+			got := NormalizeSettings(tc.in)
+			if got != tc.want {
+				t.Errorf("NormalizeSettings() = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestDTOJSONRoundTrip(t *testing.T) {
+	want := ListFilesResult{
+		FolderID: "folder-123",
+		Files: []FileMeta{
+			{
+				ID:           "file-1",
+				Name:         "note.md",
+				MimeType:     "text/markdown",
+				ModifiedTime: "2026-11-12T00:00:00Z",
+				Size:         "42",
+			},
+		},
+		RotatedRefreshToken: "new-rt",
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var got ListFilesResult
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if got.FolderID != want.FolderID || len(got.Files) != 1 || got.Files[0] != want.Files[0] || got.RotatedRefreshToken != want.RotatedRefreshToken {
+		t.Fatalf("round-trip mismatch: got %+v, want %+v", got, want)
 	}
 }

@@ -10,6 +10,7 @@
 		"build": "npm run build:wasm && tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
 		"lint": "eslint .",
+		"test": "vitest run",
 		"test:go": "go test ./go/..."
 	},
 	"keywords": [],
@@ -24,6 +25,7 @@
 		"jiti": "^2.6.1",
 		"obsidian": "^1.14.4",
 		"typescript": "^6.0.3",
-		"typescript-eslint": "^8.59.1"
+		"typescript-eslint": "^8.59.1",
+		"vitest": "^5.1.0"
 	}
 }
