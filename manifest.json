@@ -3,7 +3,7 @@
 	"name": "test-gdoc",
 	"version": "0.1.0",
 	"minAppVersion": "1.13.0",
-	"description": "Playground for GDrive using go as Obsidian plugin",
+	"description": "Playground for GDrive using go as Obsidian plugin.",
 	"author": "Bob Hyman",
 	"isDesktopOnly": false
 }
