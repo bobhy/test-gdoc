@@ -1,9 +1,9 @@
 name: Release Obsidian plugin
 
+# Releases are published locally via ./release.fish (Go Wasm build toolchain).
+# Manual workflow_dispatch prevents tag pushes from triggering duplicate draft releases.
 on:
-    push:
-        tags:
-            - '*'
+    workflow_dispatch:
 
 jobs:
     build:
