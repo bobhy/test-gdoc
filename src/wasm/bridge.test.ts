@@ -103,6 +103,7 @@ describe('GoWasmBridge', () => {
 			}),
 		});
 
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		const rotated: string[] = [];
 		const bridge = new GoWasmBridge((tok) => {
 			rotated.push(tok);
@@ -113,6 +114,7 @@ describe('GoWasmBridge', () => {
 		expect(res.files).toHaveLength(1);
 		expect(rotated).toEqual(['rotated-secret-99']);
 		expect(bridge.initDurationMs).not.toBeNull();
+		expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[test-gdoc] Go Wasm initialized in '));
 		expect(typeof fakeGlobals.__testgdocHost?.httpFetch).toBe('function');
 
 		bridge.unload();

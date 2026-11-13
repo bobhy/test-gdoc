@@ -152,7 +152,7 @@ export class GoWasmBridge {
 
 		const api = await waitForBridge(INIT_TIMEOUT_MS);
 		this.lastInitDurationMs = Math.round((performance.now() - startedAt) * 100) / 100;
-		console.debug(`[test-gdoc] Go Wasm initialized in ${this.lastInitDurationMs} ms`);
+		console.warn(`[test-gdoc] Go Wasm initialized in ${this.lastInitDurationMs} ms`);
 		return api;
 	}
 }

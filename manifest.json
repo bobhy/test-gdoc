@@ -1,7 +1,7 @@
 {
 	"id": "test-gdoc",
 	"name": "test-gdoc",
-	"version": "1.0.0",
+	"version": "0.1.0",
 	"minAppVersion": "1.13.0",
 	"description": "Playground for GDrive using go as Obsidian plugin",
 	"author": "Bob Hyman",

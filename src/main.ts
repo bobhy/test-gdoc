@@ -37,6 +37,7 @@ export default class TestGdocPlugin extends Plugin {
 	wasmBridge!: GoWasmBridge;
 
 	private bridgeConfigured = false;
+	private settingTab?: GoWasmSettingTab;
 
 	/** Initializes settings, checks `vault-share` exclusion, and defers Wasm loading until first use. */
 	async onload(): Promise<void> {
@@ -67,6 +68,7 @@ export default class TestGdocPlugin extends Plugin {
 			try {
 				this.oauth.handleAuthCallback(params);
 				this.bridgeConfigured = false;
+				this.settingTab?.update();
 				new Notice('Signed in to Google Drive.');
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
@@ -104,7 +106,8 @@ export default class TestGdocPlugin extends Plugin {
 			},
 		});
 
-		this.addSettingTab(new GoWasmSettingTab(this.app, this));
+		this.settingTab = new GoWasmSettingTab(this.app, this);
+		this.addSettingTab(this.settingTab);
 	}
 
 	/** Shuts down the Go WebAssembly runtime when the plugin is unloaded. */

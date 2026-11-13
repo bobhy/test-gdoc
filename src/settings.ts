@@ -29,15 +29,18 @@ export class GoWasmSettingTab extends PluginSettingTab {
 	 * and indexed in global settings search).
 	 */
 	getSettingDefinitions(): SettingDefinitionItem<keyof PluginSettings>[] {
-		const isAuthenticated = this.plugin.oauth.isAuthenticated;
+		const authDesc = (authenticated: boolean): string =>
+			authenticated
+				? 'Connected to Google Drive via vault-share relay.'
+				: 'Sign in with Google to authorize Drive file access.';
 
 		return [
 			{
 				name: 'Google Drive account',
-				desc: isAuthenticated
-					? 'Connected to Google Drive via vault-share relay.'
-					: 'Sign in with Google to authorize Drive file access.',
+				desc: authDesc(this.plugin.oauth.isAuthenticated),
 				render: (setting) => {
+					const isAuthenticated = this.plugin.oauth.isAuthenticated;
+					setting.setDesc(authDesc(isAuthenticated));
 					setting.addButton((button) => {
 						button
 							.setButtonText(isAuthenticated ? 'Log out' : 'Log in')
