@@ -28,7 +28,7 @@ This repository is configured so **Gemini** (Antigravity / Gemini CLI), **Claude
 
 ## Environment & tooling
 
-- **Node.js**: Current LTS (Node 18+ minimum; Node 22+ recommended).
+- **Node.js**: Current LTS (Node 20.19+ minimum; Node 26 LTS recommended).
 - **Go**: Go 1.26+ toolchain (`go.mod` targets Go 1.27; required for `go/cmd/gents` reflection iterators and `GOOS=js GOARCH=wasm` builds).
 - **Package manager**: `npm` (`package.json` defines all build, codegen, lint, and test scripts).
 - **Bundler**: `esbuild` (`esbuild.config.mjs` bundles TypeScript, `build/wasm_exec.js`, and `build/plugin.wasm` via the `.wasm: 'binary'` loader into `main.js`).
