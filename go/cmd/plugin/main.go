@@ -8,10 +8,10 @@ import (
 	"sync"
 	"syscall/js"
 
-	"sample-go-plugin/go/settings"
+	"test-gdoc/go/settings"
 )
 
-const globalNamespace = "__samplegoplugin"
+const globalNamespace = "__testgdoc"
 
 type errorResponse struct {
 	Error string `json:"error"`

@@ -1,11 +1,9 @@
 {
-	"id": "sample-go-plugin",
-	"name": "Sample Go Plugin",
+	"id": "test-gdoc",
+	"name": "test-gdoc",
 	"version": "1.0.0",
 	"minAppVersion": "1.13.0",
-	"description": "Sample plugin for Obsidian (https://obsidian.md) demonstrating use of Go/WebAssembly and TypeScript.",
-	"author": "Obsidian, Bob Hyman",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"description": "Playground for GDrive using go as Obsidian plugin",
+	"author": "Bob Hyman",
 	"isDesktopOnly": false
 }

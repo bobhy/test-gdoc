@@ -1,3 +1,3 @@
-module sample-go-plugin
+module test-gdoc
 
 go 1.27

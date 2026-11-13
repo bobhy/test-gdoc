@@ -11,7 +11,7 @@ import (
 	"reflect"
 	"strings"
 
-	"sample-go-plugin/go/settings"
+	"test-gdoc/go/settings"
 )
 
 func main() {
