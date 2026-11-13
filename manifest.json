@@ -1,11 +1,9 @@
 {
 	"id": "sample-go-plugin",
 	"name": "Sample Go Plugin",
-	"version": "1.0.0",
+	"version": "0.0.2",
 	"minAppVersion": "1.13.0",
 	"description": "Sample plugin for Obsidian (https://obsidian.md) demonstrating use of Go/WebAssembly and TypeScript.",
-	"author": "Obsidian, Bob Hyman",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"author": "Bob Hyman",
 	"isDesktopOnly": false
 }

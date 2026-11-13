@@ -40,7 +40,7 @@ This is a sample plugin for [Obsidian](https://obsidian.md) that demonstrates ho
 
 ## Prerequisites
 
-- **Node.js**: Current LTS (Node 18+ required; Node 22+ recommended)
+- **Node.js**: Current LTS (Node 20.19+ required; Node 26 LTS recommended)
 - **Go**: Go 1.26+ (uses `reflect.Type.Fields` iterators and `lib/wasm/wasm_exec.js`; `go.mod` targets Go 1.27)
 
 ## Quick start
@@ -72,6 +72,7 @@ To use this repository as the base for a new plugin while keeping the ability to
 git clone <sample-go-plugin-url> my-obsidian-plugin
 cd my-obsidian-plugin
 git remote rename origin sample-base
+gh repo create my-obsidian-plugin --public
 git remote add origin <my-obsidian-plugin-url>
 git push -u origin main
 ```
