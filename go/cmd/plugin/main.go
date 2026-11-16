@@ -15,11 +15,15 @@ import (
 
 const globalNamespace = "__testgdoc"
 
+var activeService *BridgeService
+
 func main() {
 	done := make(chan struct{})
 	var closeOnce sync.Once
 
-	service := NewBridgeService(jsRequestUrlDo, gdrive.DefaultRetryOptions())
+	idbStore := newIDBStore("default")
+	service := NewBridgeService(jsRequestUrlDo, gdrive.DefaultRetryOptions(), idbStore, idbStore.SetVaultName)
+	activeService = service
 
 	invokeFn := js.FuncOf(func(_ js.Value, args []js.Value) any {
 		if len(args) < 2 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
@@ -36,6 +40,9 @@ func main() {
 
 	shutdownFn := js.FuncOf(func(_ js.Value, _ []js.Value) any {
 		closeOnce.Do(func() {
+			idbStore.Close()
+			resetHostCache()
+			activeService = nil
 			js.Global().Delete(globalNamespace)
 			close(done)
 		})

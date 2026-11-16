@@ -1,6 +1,6 @@
 {
 	"name": "test-gdoc",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Playground for GDrive using go as Obsidian plugin",
 	"main": "main.js",
 	"type": "module",
@@ -21,6 +21,7 @@
 		"esbuild": "^0.28.2",
 		"eslint": "^10.14.0",
 		"eslint-plugin-obsidianmd": "^0.5.1",
+		"fake-indexeddb": "^6.2.8",
 		"globals": "^17.14.0",
 		"jiti": "^2.6.1",
 		"obsidian": "^1.14.4",

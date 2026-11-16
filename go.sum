@@ -1,0 +1,4 @@
+github.com/bobhy/go-indexeddb v0.0.0-20261116050352-825f56105418 h1:02z21yeiUeVZ42F/pKdSyz/tzo0qm1BKcShkvC+nxwo=
+github.com/bobhy/go-indexeddb v0.0.0-20261116050352-825f56105418/go.mod h1:QvfTevpDVlkfomY498LhstjwbPW6QC4VC/lxYb0Kom0=
+github.com/hack-pad/safejs v0.1.1 h1:d5qPO0iQ7h2oVtpzGnLExE+Wn9AtytxIfltcS2b9KD8=
+github.com/hack-pad/safejs v0.1.1/go.mod h1:HdS+bKF1NrE72VoXZeWzxFOVQVUSqZJAG0xNCnb+Tio=

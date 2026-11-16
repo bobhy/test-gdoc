@@ -9,18 +9,73 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"test-gdoc/go/gdrive"
 	"test-gdoc/go/settings"
+	"test-gdoc/go/syncplan"
+	"test-gdoc/go/syncstore"
 )
 
-func TestBridgeServiceMergeAndPushFlow(t *testing.T) {
-	var mu sync.Mutex
-	driveFiles := map[string]string{
-		"f-note": "line 1\nline 2\nline 3",
-	}
+type fakeVaultFS struct {
+	mu    sync.Mutex
+	files map[string]string
+}
 
+func (f *fakeVaultFS) ListFlatStats(folder string) ([]settings.VaultFileStat, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	prefix := syncplan.NormalizeVaultPath(folder)
+	var out []settings.VaultFileStat
+	for p, body := range f.files {
+		if strings.HasPrefix(p, prefix+"/") {
+			rest := strings.TrimPrefix(p, prefix+"/")
+			if !strings.Contains(rest, "/") {
+				out = append(out, settings.VaultFileStat{
+					Name:    rest,
+					Path:    p,
+					Size:    int64(len(body)),
+					MTimeMs: 100,
+				})
+			}
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeVaultFS) Exists(path string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.files[syncplan.NormalizeVaultPath(path)]
+	return ok, nil
+}
+
+func (f *fakeVaultFS) ReadText(path string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.files[syncplan.NormalizeVaultPath(path)]
+	return v, ok, nil
+}
+
+func (f *fakeVaultFS) WriteText(path, content string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[syncplan.NormalizeVaultPath(path)] = content
+	return nil
+}
+
+func (f *fakeVaultFS) RenameFile(oldPath, newPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o := syncplan.NormalizeVaultPath(oldPath)
+	n := syncplan.NormalizeVaultPath(newPath)
+	if v, ok := f.files[o]; ok {
+		delete(f.files, o)
+		f.files[n] = v
+	}
+	return nil
+}
+
+func newTestServer(mu *sync.Mutex, driveFiles map[string]string, driveNames map[string]string) (*httptest.Server, gdrive.DoFunc) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/google/token/refresh" {
 			w.Header().Set("Content-Type", "application/json")
@@ -35,30 +90,64 @@ func TestBridgeServiceMergeAndPushFlow(t *testing.T) {
 				_, _ = w.Write([]byte(`{"files":[{"id":"folder-1","name":"test-gdoc","mimeType":"application/vnd.google-apps.folder"}]}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"files":[{"id":"f-note","name":"note.md","mimeType":"text/markdown"}]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/drive/v3/files/f-note" && r.URL.Query().Get("alt") == "media":
 			mu.Lock()
-			content := driveFiles["f-note"]
+			var items []settings.FileMeta
+			for id, body := range driveFiles {
+				name := driveNames[id]
+				sha, md5Hex, _ := syncstore.ComputeChecksums(body)
+				items = append(items, settings.FileMeta{
+					ID:             id,
+					Name:           name,
+					MimeType:       "text/markdown",
+					SHA256Checksum: sha,
+					MD5Checksum:    md5Hex,
+				})
+			}
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": items})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/drive/v3/files/") && r.URL.Query().Get("alt") == "media":
+			id := strings.TrimPrefix(r.URL.Path, "/drive/v3/files/")
+			mu.Lock()
+			content := driveFiles[id]
 			mu.Unlock()
 			w.Header().Set("Content-Type", "text/markdown")
 			_, _ = w.Write([]byte(content))
-		case r.Method == http.MethodPatch && r.URL.Path == "/upload/drive/v3/files/f-note":
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/drive/v3/files/"):
+			id := strings.TrimPrefix(r.URL.Path, "/drive/v3/files/")
+			var metaPatch struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&metaPatch)
+			mu.Lock()
+			if metaPatch.Name != "" {
+				driveNames[id] = metaPatch.Name
+			}
+			sha, md5Hex, _ := syncstore.ComputeChecksums(driveFiles[id])
+			name := driveNames[id]
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(settings.FileMeta{
+				ID: id, Name: name, MimeType: "text/markdown", SHA256Checksum: sha, MD5Checksum: md5Hex,
+			})
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/upload/drive/v3/files/"):
+			id := strings.TrimPrefix(r.URL.Path, "/upload/drive/v3/files/")
 			raw, _ := io.ReadAll(r.Body)
-			// Extract uploaded content after blank line in multipart media section for assertion.
 			s := string(raw)
 			idx := strings.LastIndex(s, "\r\n\r\n")
 			endIdx := strings.LastIndex(s, "\r\n--")
+			mu.Lock()
 			if idx > 0 && endIdx > idx {
-				mu.Lock()
-				driveFiles["f-note"] = s[idx+4 : endIdx]
-				mu.Unlock()
+				driveFiles[id] = s[idx+4 : endIdx]
 			}
-			_, _ = w.Write([]byte(`{"id":"f-note","name":"note.md","mimeType":"text/markdown"}`))
+			sha, md5Hex, _ := syncstore.ComputeChecksums(driveFiles[id])
+			name := driveNames[id]
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(settings.FileMeta{
+				ID: id, Name: name, MimeType: "text/markdown", SHA256Checksum: sha, MD5Checksum: md5Hex,
+			})
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 		}
 	}))
-	defer srv.Close()
 
 	doFunc := func(ctx context.Context, req *gdrive.HTTPRequest) (*gdrive.HTTPResponse, error) {
 		httpReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, strings.NewReader(string(req.Body)))
@@ -80,44 +169,117 @@ func TestBridgeServiceMergeAndPushFlow(t *testing.T) {
 		}
 		return &gdrive.HTTPResponse{StatusCode: resp.StatusCode, Headers: hdrs, Body: b}, nil
 	}
+	return srv, doFunc
+}
 
-	svc := NewBridgeService(doFunc, gdrive.RetryOptions{
-		MaxAttempts: 2,
-		BaseDelay:   time.Millisecond,
-		MaxDelay:    time.Millisecond,
-		Sleep:       func(_ context.Context, _ time.Duration) error { return nil },
-		Jitter:      func(_ time.Duration) time.Duration { return 0 },
-	})
+func TestBridgeServiceHybridPullPushWithSyncStore(t *testing.T) {
+	var mu sync.Mutex
+	driveFiles := map[string]string{
+		"f-a": "line 1\nline 2\nline 3",
+		"f-b": "beta remote",
+	}
+	driveNames := map[string]string{
+		"f-a": "a.md",
+		"f-b": "b.txt",
+	}
+	srv, doFunc := newTestServer(&mu, driveFiles, driveNames)
+	defer srv.Close()
+
+	store := syncstore.NewMemoryStore()
+	svc := NewBridgeService(doFunc, gdrive.RetryOptions{MaxAttempts: 2}, store, nil)
 	svc.auth = gdrive.NewTokenManager(&http.Client{Transport: gdrive.NewTransport(doFunc, 0)}, srv.URL)
 	svc.client = gdrive.NewClient(&http.Client{Transport: gdrive.NewTransport(doFunc, 3)}, svc.auth, gdrive.RetryOptions{MaxAttempts: 2})
 	svc.client.SetEndpoints(srv.URL+"/drive/v3", srv.URL+"/upload/drive/v3")
 
-	cfgPayload, _ := json.Marshal(settings.ConfigureRequest{RefreshToken: "rt-1", MaxPendingRequests: 2})
+	cfgPayload, _ := json.Marshal(settings.ConfigureRequest{RefreshToken: "rt-1", MaxPendingRequests: 3, VaultName: "v1"})
 	if _, err := svc.Handle(context.Background(), "configure", string(cfgPayload)); err != nil {
 		t.Fatalf("configure failed: %v", err)
 	}
 
-	// Simulate remote edit on line 3 while local edited line 1.
+	vault := &fakeVaultFS{files: map[string]string{}}
+	pullRaw, err := svc.Handle(context.Background(), "pullPrepare", `{"folderPath":"/test-gdoc"}`)
+	if err != nil {
+		t.Fatalf("pullPrepare: %v", err)
+	}
+	pullPrep := pullRaw.(settings.PullPrepareResult)
+	pullSum, err := svc.ApplyPullBatch(vault, pullPrep.BatchID, "sync")
+	if err != nil || pullSum.Pulled != 2 || pullSum.UpdatedIDB != 2 {
+		t.Fatalf("ApplyPullBatch = %+v err=%v", pullSum, err)
+	}
+
+	// Verify base stored inside syncstore without any Vault base folder.
+	baseA, _, hasBase, err := store.GetBase(context.Background(), "a.md")
+	if err != nil || !hasBase || baseA != "line 1\nline 2\nline 3" {
+		t.Fatalf("expected stored base in SyncStore, got hasBase=%v base=%q err=%v", hasBase, baseA, err)
+	}
+
+	// Simulate non-overlapping concurrent edits (local line 1, remote line 3) and conflict-marked merge.
+	vault.files["sync/a.md"] = "local 1\nline 2\nline 3"
 	mu.Lock()
-	driveFiles["f-note"] = "line 1\nline 2\nremote 3"
+	driveFiles["f-a"] = "line 1\nline 2\nremote 3"
 	mu.Unlock()
 
-	pushPayload, _ := json.Marshal(settings.MergeAndPushRequest{
-		FolderPath:   "/test-gdoc",
-		FileName:     "note.md",
-		BaseContent:  "line 1\nline 2\nline 3",
-		LocalContent: "local 1\nline 2\nline 3",
-		HasBase:      true,
-	})
-	rawRes, err := svc.Handle(context.Background(), "mergeAndPushFile", string(pushPayload))
+	batchID, err := svc.PreparePushInputs(vault, "sync", "a.md")
 	if err != nil {
-		t.Fatalf("mergeAndPushFile failed: %v", err)
+		t.Fatalf("PreparePushInputs: %v", err)
 	}
-	res := rawRes.(settings.MergeAndPushResult)
-	if res.Outcome != "clean" || !res.DriveUpdated || !res.LocalUpdated {
-		t.Fatalf("unexpected MergeAndPushResult: %+v", res)
+	execPayload, _ := json.Marshal(settings.PushExecuteRequest{FolderPath: "/test-gdoc", BatchID: batchID})
+	execRaw, err := svc.Handle(context.Background(), "executePreparedPush", string(execPayload))
+	if err != nil {
+		t.Fatalf("executePreparedPush: %v", err)
 	}
-	if res.Content != "local 1\nline 2\nremote 3" {
-		t.Fatalf("merged Content = %q", res.Content)
+	execRes := execRaw.(settings.PushExecuteResult)
+	if execRes.Outcome != "clean" {
+		t.Fatalf("outcome = %q, want clean", execRes.Outcome)
+	}
+	applySum, err := svc.ApplyPreparedPush(vault, batchID)
+	if err != nil || applySum.Outcome != "clean" {
+		t.Fatalf("ApplyPreparedPush = %+v err=%v", applySum, err)
+	}
+	if vault.files["sync/a.md"] != "local 1\nline 2\nremote 3" {
+		t.Fatalf("merged local = %q", vault.files["sync/a.md"])
+	}
+
+	// Verify scan + base inspector RPCs.
+	scanID, err := svc.CollectVaultStats(vault, "sync")
+	if err != nil {
+		t.Fatalf("CollectVaultStats: %v", err)
+	}
+	prepPayload, _ := json.Marshal(prepareScanPayload{
+		ScanID: scanID, DriveFolderPath: "/test-gdoc", LocalSyncFolderPath: "sync", IncludeDrive: true,
+	})
+	if _, err := svc.Handle(context.Background(), "prepareVaultScan", string(prepPayload)); err != nil {
+		t.Fatalf("prepareVaultScan: %v", err)
+	}
+	if err := svc.ReadVaultFilesForScan(vault, scanID); err != nil {
+		t.Fatalf("ReadVaultFilesForScan: %v", err)
+	}
+	commitPayload, _ := json.Marshal(commitScanPayload{ScanID: scanID})
+	stateRaw, err := svc.Handle(context.Background(), "commitSyncScan", string(commitPayload))
+	if err != nil {
+		t.Fatalf("commitSyncScan: %v", err)
+	}
+	stateRes := stateRaw.(settings.GetSyncStateResult)
+	if len(stateRes.Records) != 2 {
+		t.Fatalf("expected 2 SyncRecords, got %+v", stateRes.Records)
+	}
+
+	if _, err := svc.Handle(context.Background(), "clearBaseSnapshot", `{"fileName":"b.txt"}`); err != nil {
+		t.Fatalf("clearBaseSnapshot: %v", err)
+	}
+	getBaseRaw, err := svc.Handle(context.Background(), "getBaseSnapshot", `{"fileName":"b.txt"}`)
+	if err != nil {
+		t.Fatalf("getBaseSnapshot: %v", err)
+	}
+	if getBaseRaw.(settings.BaseSnapshotResult).HasBase {
+		t.Fatal("expected b.txt base to be cleared")
+	}
+
+	benchRaw, err := svc.Handle(context.Background(), "runIdbBenchmark", `{"count":10}`)
+	if err != nil {
+		t.Fatalf("runIdbBenchmark: %v", err)
+	}
+	if benchRaw.(settings.IDBBenchResult).Count != 10 {
+		t.Fatalf("unexpected bench result: %+v", benchRaw)
 	}
 }

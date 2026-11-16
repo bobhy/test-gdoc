@@ -6,6 +6,7 @@ export default defineConfig(
 	globalIgnores([
 		'node_modules',
 		'build',
+		'benchmarks',
 		'dist',
 		'esbuild.config.mjs',
 		'eslint.config.mts',

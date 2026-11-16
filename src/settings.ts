@@ -68,20 +68,11 @@ export class GoWasmSettingTab extends PluginSettingTab {
 			},
 			{
 				name: 'Local sync folder',
-				desc: 'Vault folder storing synced flat Markdown and text files.',
+				desc: 'Vault folder storing synced flat Markdown and text files (common bases live in IndexedDB).',
 				control: {
 					type: 'text',
 					key: 'localSyncFolderPath',
 					placeholder: DEFAULT_SETTINGS.localSyncFolderPath,
-				},
-			},
-			{
-				name: 'Base snapshot folder',
-				desc: 'Vault folder holding user-managed base snapshots for 3-way merge.',
-				control: {
-					type: 'text',
-					key: 'baseSnapshotFolderPath',
-					placeholder: DEFAULT_SETTINGS.baseSnapshotFolderPath,
 				},
 			},
 			{

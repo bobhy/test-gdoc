@@ -35,26 +35,23 @@ func TestNormalizeSettings(t *testing.T) {
 		{
 			name: "empty strings and non-positive maxPendingRequests fall back to defaults",
 			in: PluginSettings{
-				DriveFolderPath:        "   ",
-				LocalSyncFolderPath:    "",
-				BaseSnapshotFolderPath: "\t",
-				MaxPendingRequests:     0,
+				DriveFolderPath:     "   ",
+				LocalSyncFolderPath: "",
+				MaxPendingRequests:  0,
 			},
 			want: DefaultSettings(),
 		},
 		{
 			name: "clamps high maxPendingRequests",
 			in: PluginSettings{
-				DriveFolderPath:        "/custom",
-				LocalSyncFolderPath:    "local",
-				BaseSnapshotFolderPath: "base",
-				MaxPendingRequests:     99,
+				DriveFolderPath:     "/custom",
+				LocalSyncFolderPath: "local",
+				MaxPendingRequests:  99,
 			},
 			want: PluginSettings{
-				DriveFolderPath:        "/custom",
-				LocalSyncFolderPath:    "local",
-				BaseSnapshotFolderPath: "base",
-				MaxPendingRequests:     10,
+				DriveFolderPath:     "/custom",
+				LocalSyncFolderPath: "local",
+				MaxPendingRequests:  10,
 			},
 		},
 	}

@@ -1,9 +1,9 @@
 /**
- * Obsidian plugin entrypoint managing lifecycle, mutual exclusion guard, settings,
- * OAuth callback registration, Drive `ItemView`, and Go Wasm bridge orchestration.
+ * Obsidian plugin entrypoint managing lifecycle, platform/mutual-exclusion guards, settings,
+ * OAuth callback registration, Vault delete/create/modify tracking, UI views, and Go Wasm bridge.
  */
 
-import { Notice, Plugin, normalizePath } from 'obsidian';
+import { Notice, Plugin, TFile, normalizePath } from 'obsidian';
 import {
 	OAUTH_PROTOCOL_ACTION,
 	OAuthManager,
@@ -14,32 +14,30 @@ import {
 	GoWasmSettingTab,
 	type PluginSettings,
 } from './settings';
+import type { VaultEventHint } from './settings.generated';
 import { DRIVE_VIEW_TYPE, DriveItemView } from './ui/drive-view';
-import {
-	ObsidianVaultBackend,
-	VaultSyncAdapter,
-	isEligibleFileName,
-	joinVaultPath,
-} from './vault/sync-adapter';
+import { SYNC_STATE_VIEW_TYPE, SyncStateView } from './ui/sync-state-view';
+import { isEligibleFileName, joinVaultPath } from './vault/sync-adapter';
 import { GoWasmBridge } from './wasm/bridge';
+import { getJspiUnsupportedReason } from './wasm/platform';
 
 /**
- * Obsidian plugin validating Go/Wasm Google Drive operations and N-way 3-way merge.
+ * Obsidian plugin validating Go/Wasm JSPI + IndexedDB Google Drive sync and 3-way merge.
  */
 export default class TestGdocPlugin extends Plugin {
 	/** Plugin settings synchronized with Go's `settings.PluginSettings` struct. */
 	settings!: PluginSettings;
 	/** OAuth login and `SecretStorage` manager. */
 	oauth!: OAuthManager;
-	/** Flat-folder vault and non-destructive base-snapshot adapter. */
-	syncAdapter!: VaultSyncAdapter;
-	/** Lazy-initialized Go WebAssembly RPC bridge. */
+	/** Lazy-initialized Go WebAssembly JSPI + IndexedDB bridge. */
 	wasmBridge!: GoWasmBridge;
 
 	private bridgeConfigured = false;
+	private bridgeVaultConfigured = false;
 	private settingTab?: GoWasmSettingTab;
+	private pendingVaultHints: VaultEventHint[] = [];
 
-	/** Initializes settings, checks `vault-share` exclusion, and defers Wasm loading until first use. */
+	/** Initializes settings, verifies JSPI & vault-share exclusion, and registers Vault hooks. */
 	async onload(): Promise<void> {
 		if (await isVaultSharePresent(this.app)) {
 			new Notice(
@@ -50,19 +48,23 @@ export default class TestGdocPlugin extends Plugin {
 			return;
 		}
 
+		const unsupportedReason = getJspiUnsupportedReason();
+		if (unsupportedReason) {
+			new Notice(`Test GDoc startup aborted: ${unsupportedReason}`, 0);
+			console.error(`[test-gdoc] Startup aborted: ${unsupportedReason}`);
+			return;
+		}
+
 		await this.loadSettings();
 
 		this.oauth = new OAuthManager(this.app);
 		this.oauth.loadFromSecretStorage();
 
-		this.syncAdapter = new VaultSyncAdapter(new ObsidianVaultBackend(this.app.vault));
-		this.wasmBridge = new GoWasmBridge((rotatedToken) => {
+		this.wasmBridge = new GoWasmBridge(this.app, (rotatedToken) => {
 			this.oauth.saveRefreshToken(rotatedToken);
 		});
 
-		this.app.workspace.onLayoutReady(() => {
-			void this.seedLocalBaseSnapshots();
-		});
+		this.registerVaultEventHints();
 
 		this.registerObsidianProtocolHandler(OAUTH_PROTOCOL_ACTION, (params) => {
 			try {
@@ -77,6 +79,7 @@ export default class TestGdocPlugin extends Plugin {
 		});
 
 		this.registerView(DRIVE_VIEW_TYPE, (leaf) => new DriveItemView(leaf, this));
+		this.registerView(SYNC_STATE_VIEW_TYPE, (leaf) => new SyncStateView(leaf, this));
 
 		this.addRibbonIcon('cloud', 'Open Google Drive browser', () => {
 			void this.openDriveView();
@@ -91,8 +94,16 @@ export default class TestGdocPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'open-sync-state-inspector',
+			name: 'Open sync state and IndexedDB inspector',
+			callback: () => {
+				void this.openSyncStateView();
+			},
+		});
+
+		this.addCommand({
 			id: 'pull-drive-folder',
-			name: 'Pull Google Drive folder',
+			name: 'Pull Google Drive folder into local sync folder',
 			callback: () => {
 				void this.pullDriveFolder();
 			},
@@ -148,6 +159,20 @@ export default class TestGdocPlugin extends Plugin {
 		new Notice('Logged out of Google Drive.');
 	}
 
+	/** Ensures Wasm and per-vault IndexedDB naming are configured (without requiring Drive auth). */
+	async ensureBridgeVaultConfigured(): Promise<void> {
+		if (!this.bridgeVaultConfigured) {
+			await this.wasmBridge.configure({
+				refreshToken: this.oauth.getRefreshToken(),
+				maxPendingRequests: this.settings.maxPendingRequests,
+			});
+			this.bridgeVaultConfigured = true;
+			if (this.oauth.isAuthenticated) {
+				this.bridgeConfigured = true;
+			}
+		}
+	}
+
 	/** Lazily initializes Wasm and applies the current refresh token and concurrency limit. */
 	async ensureBridgeConfigured(): Promise<void> {
 		if (!this.oauth.isAuthenticated) {
@@ -159,50 +184,43 @@ export default class TestGdocPlugin extends Plugin {
 				maxPendingRequests: this.settings.maxPendingRequests,
 			});
 			this.bridgeConfigured = true;
+			this.bridgeVaultConfigured = true;
 		}
+	}
+
+	/** Flushes buffered Vault create/delete/modify notifications into Go's IndexedDB store. */
+	async flushVaultHints(): Promise<void> {
+		if (this.pendingVaultHints.length === 0) {
+			return;
+		}
+		const batch = this.pendingVaultHints.splice(0, this.pendingVaultHints.length);
+		await this.wasmBridge.recordVaultHints(batch);
 	}
 
 	/** Opens or reveals the direct Drive browser `ItemView`. */
 	async openDriveView(): Promise<void> {
-		const existing = this.app.workspace.getLeavesOfType(DRIVE_VIEW_TYPE)[0];
-		if (existing) {
-			await this.app.workspace.revealLeaf(existing);
-			return;
-		}
-		const leaf = this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf(true);
-		await leaf.setViewState({ type: DRIVE_VIEW_TYPE, active: true });
-		await this.app.workspace.revealLeaf(leaf);
+		await this.revealOrOpenView(DRIVE_VIEW_TYPE);
 	}
 
-	/** Pulls all flat `.md`/`.txt` files from Drive into `localSyncFolderPath` and seeds missing bases. */
+	/** Opens or reveals the IndexedDB sync state inspector `ItemView`. */
+	async openSyncStateView(): Promise<void> {
+		await this.revealOrOpenView(SYNC_STATE_VIEW_TYPE);
+	}
+
+	/** Pulls all flat `.md`/`.txt` files from Drive into `localSyncFolderPath` via Go + IndexedDB. */
 	async pullDriveFolder(): Promise<void> {
 		try {
 			await this.ensureBridgeConfigured();
-			const listRes = await this.wasmBridge.listFiles({
-				folderPath: this.settings.driveFolderPath,
-			});
-			let pulled = 0;
-			let seeded = 0;
-			for (const file of listRes.files) {
-				const readRes = await this.wasmBridge.readFile({ fileId: file.id });
-				if (
-					await this.syncAdapter.seedMissingBaseFromDrive(
-						this.settings.localSyncFolderPath,
-						this.settings.baseSnapshotFolderPath,
-						file.name,
-						readRes.content,
-					)
-				) {
-					seeded++;
-				}
-				await this.syncAdapter.writeLocalFile(
-					this.settings.localSyncFolderPath,
-					file.name,
-					readRes.content,
-				);
-				pulled++;
-			}
-			new Notice(`Pulled ${pulled} file(s) from Drive (seeded ${seeded} missing base file(s)).`);
+			await this.flushVaultHints();
+			const sum = await this.wasmBridge.pullDriveFolder(
+				this.settings.driveFolderPath,
+				this.settings.localSyncFolderPath,
+			);
+			const ms = this.wasmBridge.lastOperationDurationMs;
+			const timing = ms !== null ? ` in ${ms} ms` : '';
+			new Notice(
+				`Pulled ${sum.pulled} file(s) from Drive (updated ${sum.updatedIdb} IDB record(s), renamed ${sum.renamed})${timing}.`,
+			);
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			console.error('[test-gdoc] Pull failed:', err);
@@ -210,7 +228,7 @@ export default class TestGdocPlugin extends Plugin {
 		}
 	}
 
-	/** Reconciles the active flat note in `localSyncFolderPath` with Drive via Go's 3-way merge. */
+	/** Reconciles the active flat note in `localSyncFolderPath` with Drive using IndexedDB base state. */
 	async pushActiveNote(): Promise<void> {
 		const activeFile = this.app.workspace.getActiveFile();
 		if (!activeFile) {
@@ -226,49 +244,28 @@ export default class TestGdocPlugin extends Plugin {
 
 		try {
 			await this.ensureBridgeConfigured();
-			const localContent = await this.app.vault.read(activeFile);
-			const baseContent = await this.syncAdapter.readBaseSnapshot(
-				this.settings.baseSnapshotFolderPath,
+			await this.flushVaultHints();
+			const sum = await this.wasmBridge.pushActiveNote(
+				this.settings.driveFolderPath,
+				this.settings.localSyncFolderPath,
 				activeFile.name,
 			);
+			const ms = this.wasmBridge.lastOperationDurationMs;
+			const timing = ms !== null ? ` (${ms} ms)` : '';
 
-			const res = await this.wasmBridge.mergeAndPushFile({
-				folderPath: this.settings.driveFolderPath,
-				fileName: activeFile.name,
-				baseContent: baseContent ?? '',
-				localContent,
-				hasBase: baseContent !== null,
-			});
-
-			if (baseContent === null) {
-				await this.syncAdapter.seedMissingBaseFromDrive(
-					this.settings.localSyncFolderPath,
-					this.settings.baseSnapshotFolderPath,
-					activeFile.name,
-					res.remoteExisted ? res.remoteContent : localContent,
+			if (sum.outcome === 'keepBoth') {
+				new Notice(
+					`Merge fell back to keep-both. Saved remote copy as ${sum.conflictCopyName}${timing}.`,
+					0,
 				);
-			}
-
-			if (res.outcome === 'keepBoth') {
-				const conflictCopy = await this.syncAdapter.writeConflictCopy(
-					this.settings.localSyncFolderPath,
-					activeFile.name,
-					res.remoteContent,
+			} else if (sum.outcome === 'noop') {
+				new Notice(`${activeFile.name} is already in sync with Drive${timing}.`);
+			} else if (sum.outcome === 'folded') {
+				new Notice(
+					`Conflict detected in ${activeFile.name}; N-way conflict markers written${timing}.`,
 				);
-				new Notice(`Merge fell back to keep-both. Saved remote copy as ${conflictCopy}.`, 0);
-				return;
-			}
-
-			if (res.localUpdated) {
-				await this.app.vault.modify(activeFile, res.content);
-			}
-
-			if (res.outcome === 'noop') {
-				new Notice(`${activeFile.name} is already in sync with Drive.`);
-			} else if (res.outcome === 'folded') {
-				new Notice(`Conflict detected in ${activeFile.name}; N-way conflict markers written.`);
 			} else {
-				new Notice(`Synced ${activeFile.name} with Drive cleanly.`);
+				new Notice(`Synced ${activeFile.name} with Drive cleanly${timing}.`);
 			}
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -277,17 +274,40 @@ export default class TestGdocPlugin extends Plugin {
 		}
 	}
 
-	private async seedLocalBaseSnapshots(): Promise<void> {
-		try {
-			const seeded = await this.syncAdapter.seedBaseFromLocal(
-				this.settings.localSyncFolderPath,
-				this.settings.baseSnapshotFolderPath,
-			);
-			if (seeded > 0) {
-				console.debug(`[test-gdoc] Seeded ${seeded} missing base snapshot(s) from local sync folder.`);
-			}
-		} catch (err: unknown) {
-			console.error('[test-gdoc] Startup base-snapshot seeding failed:', err);
+	private async revealOrOpenView(viewType: string): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(viewType)[0];
+		if (existing) {
+			await this.app.workspace.revealLeaf(existing);
+			return;
 		}
+		const leaf = this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf(true);
+		await leaf.setViewState({ type: viewType, active: true });
+		await this.app.workspace.revealLeaf(leaf);
+	}
+
+	private registerVaultEventHints(): void {
+		const queueHint = (kind: 'create' | 'delete' | 'modify', abstractFile: unknown) => {
+			if (!(abstractFile instanceof TFile)) {
+				return;
+			}
+			const expectedPath = joinVaultPath(this.settings.localSyncFolderPath, abstractFile.name);
+			if (
+				!isEligibleFileName(abstractFile.name) ||
+				normalizePath(abstractFile.path) !== expectedPath
+			) {
+				return;
+			}
+			this.pendingVaultHints.push({
+				kind,
+				fileName: abstractFile.name,
+				size: abstractFile.stat.size,
+				mtimeMs: abstractFile.stat.mtime,
+				timestampMs: Date.now(),
+			});
+		};
+
+		this.registerEvent(this.app.vault.on('create', (f) => queueHint('create', f)));
+		this.registerEvent(this.app.vault.on('delete', (f) => queueHint('delete', f)));
+		this.registerEvent(this.app.vault.on('modify', (f) => queueHint('modify', f)));
 	}
 }

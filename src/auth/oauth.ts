@@ -6,8 +6,10 @@
  * redirect happens in TypeScript; token refreshes run in Go against the relay.
  */
 
-import { type App, normalizePath, requestUrl } from 'obsidian';
-import type { RequestUrlFn } from '../wasm/http-host';
+import { type App, type RequestUrlParam, type RequestUrlResponse, normalizePath, requestUrl } from 'obsidian';
+
+/** Function signature matching Obsidian's `requestUrl`. */
+export type RequestUrlFn = (request: RequestUrlParam) => Promise<RequestUrlResponse>;
 
 /** Plugin ID of the sister plugin that shares the same OAuth protocol handler. */
 export const VAULT_SHARE_PLUGIN_ID = 'vault-share';
