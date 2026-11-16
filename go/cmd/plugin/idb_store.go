@@ -260,26 +260,21 @@ func (s *idbStore) ListRecords(ctx context.Context) ([]settings.SyncRecord, erro
 	if err != nil {
 		return nil, err
 	}
-	cursorReq, err := os.OpenCursor(idb.CursorNext)
+	req, err := os.GetAll()
 	if err != nil {
 		return nil, err
 	}
-	var out []settings.SyncRecord
-	if err := cursorReq.Iter(ctx, func(c *idb.CursorWithValue) error {
-		val, valErr := c.Value()
-		if valErr != nil {
-			return valErr
-		}
-		rec, decErr := s.unmarshalRecordJS(val)
-		if decErr != nil {
-			return decErr
-		}
-		if rec != nil {
-			out = append(out, *rec)
-		}
-		return nil
-	}); err != nil {
+	rawArr, err := req.Request.Await(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if rawArr.IsUndefined() || rawArr.IsNull() || rawArr.Length() == 0 {
+		return nil, nil
+	}
+	raw := s.jsonVal.Call("stringify", rawArr).String()
+	var out []settings.SyncRecord
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("decode SyncRecords from IndexedDB: %w", err)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].FileName < out[j].FileName
