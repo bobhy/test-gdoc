@@ -1,27 +1,71 @@
 /**
- * Lazy-loading bridge between the Obsidian TypeScript plugin and the embedded Go Wasm module.
+ * Lazy-loading hybrid JSPI + single-root host + IndexedDB bridge between the Obsidian
+ * TypeScript plugin and the embedded Go Wasm module.
  */
 
 import '../../build/wasm_exec.js';
+import * as obsidianModule from 'obsidian';
+import type { App } from 'obsidian';
 import wasmBytes from '../../build/plugin.wasm';
 import type {
+	BaseSnapshotResult,
 	ConfigureRequest,
 	ConfigureResult,
-	FileMeta,
+	GetSyncStateRequest,
+	GetSyncStateResult,
+	IDBBenchResult,
 	ListFilesRequest,
 	ListFilesResult,
-	MergeAndPushRequest,
-	MergeAndPushResult,
+	PullSummary,
+	PushApplySummary,
 	ReadFileRequest,
 	ReadFileResult,
+	VaultEventHint,
 	WriteFileRequest,
 	WriteFileResult,
 } from '../settings.generated';
-import { executeHttpFetch, type RequestUrlFn } from './http-host';
-import type { WasmBridgeApi, WasmWindowGlobals } from './types';
+import { ObsidianVaultBackend, type VaultBackend } from '../vault/sync-adapter';
+import {
+	bindPromisingExports,
+	buildObsidianHostImports,
+	takeLastJspiError,
+	takeMergeDirectResult,
+	takePinnedString,
+	writeStringToGo,
+} from './jspi-host';
+import { assertJspiSupported } from './platform';
+import type {
+	ObsidianHostModule,
+	PromisedWasmExports,
+	WasmBridgeApi,
+	WasmJspiExports,
+	WasmWindowGlobals,
+} from './types';
+import {
+	assertBaseSnapshotResult,
+	assertConfigureResult,
+	assertGetSyncStateResult,
+	assertIDBBenchResult,
+	assertListFilesResult,
+	assertPrepareScanResponse,
+	assertPullPrepareResult,
+	assertPullSummary,
+	assertPushApplySummary,
+	assertPushExecuteResult,
+	assertReadFileResult,
+	assertWriteFileResult,
+} from './validators';
 
 const INIT_TIMEOUT_MS = 5000;
 const POLL_INTERVAL_MS = 10;
+
+interface RuntimeState {
+	api: WasmBridgeApi;
+	exports: WasmJspiExports;
+	promised: PromisedWasmExports;
+	scratchHeaderPtr: number;
+	mergeHeaderPtr: number;
+}
 
 function wasmGlobals(): WasmWindowGlobals {
 	return window as unknown as WasmWindowGlobals;
@@ -33,20 +77,42 @@ function wasmGlobals(): WasmWindowGlobals {
  */
 export type RotatedTokenHandler = (refreshToken: string) => void;
 
+/** Optional host overrides for Vitest unit testing. */
+export interface GoWasmBridgeOptions {
+	vaultBackend?: VaultBackend;
+	obsidianHost?: ObsidianHostModule;
+}
+
 /**
- * Manages the lifecycle of the Go WebAssembly runtime and marshals async RPC calls
- * between Obsidian TypeScript code and Go.
+ * Manages the lifecycle of the Go WebAssembly runtime, serializing all `syscall/js`
+ * (including `go-indexeddb`) and JSPI (`WebAssembly.promising`) entries through a FIFO
+ * mutex to protect Go's `REG_SP`.
  */
 export class GoWasmBridge {
-	private readyPromise: Promise<WasmBridgeApi> | null = null;
+	private readyPromise: Promise<RuntimeState> | null = null;
+	private queue: Promise<unknown> = Promise.resolve();
 	private lastInitDurationMs: number | null = null;
-	private onRotatedToken?: RotatedTokenHandler;
-	private readonly requester?: RequestUrlFn;
+	private lastOpDurationMs: number | null = null;
 
-	/** Creates a bridge instance; optional overrides support unit testing. */
-	constructor(onRotatedToken?: RotatedTokenHandler, requester?: RequestUrlFn) {
+	private readonly app: App;
+	private readonly vaultBackend: VaultBackend;
+	private readonly obsidianHost: ObsidianHostModule;
+	private onRotatedToken?: RotatedTokenHandler;
+
+	/** Creates a bridge instance bound to the plugin `App`; optional overrides support testing. */
+	constructor(
+		app: App,
+		onRotatedToken?: RotatedTokenHandler,
+		options?: GoWasmBridgeOptions,
+	) {
+		this.app = app;
 		this.onRotatedToken = onRotatedToken;
-		this.requester = requester;
+		this.vaultBackend =
+			options?.vaultBackend ?? new ObsidianVaultBackend(app.vault, app.fileManager);
+		this.obsidianHost = options?.obsidianHost ?? {
+			requestUrl: obsidianModule.requestUrl,
+			Notice: obsidianModule.Notice,
+		};
 	}
 
 	/** Updates the handler invoked when Go surfaces a rotated refresh token. */
@@ -54,48 +120,276 @@ export class GoWasmBridge {
 		this.onRotatedToken = handler;
 	}
 
-	/** Returns the measured lazy Wasm initialization latency in milliseconds, or `null` if not yet initialized. */
+	/** Returns the measured lazy Wasm initialization latency in milliseconds, or `null` before init. */
 	get initDurationMs(): number | null {
 		return this.lastInitDurationMs;
 	}
 
-	/** Configures Go-side OAuth refresh token and outbound Drive concurrency limit. */
-	async configure(req: ConfigureRequest): Promise<ConfigureResult> {
-		const parsed = await this.call('configure', req);
-		assertConfigureResult(parsed);
-		return parsed;
+	/** Returns the duration in milliseconds of the most recent bridge operation, or `null`. */
+	get lastOperationDurationMs(): number | null {
+		return this.lastOpDurationMs;
+	}
+
+	/** Configures Go-side OAuth refresh token, vault DB name, and outbound Drive concurrency limit. */
+	async configure(req: Omit<ConfigureRequest, 'vaultName'> & { vaultName?: string }): Promise<ConfigureResult> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const payload: ConfigureRequest = {
+				refreshToken: req.refreshToken,
+				maxPendingRequests: req.maxPendingRequests,
+				vaultName: req.vaultName ?? this.app.vault.getName(),
+			};
+			const parsed = await invokeJson(state.api, 'configure', payload);
+			assertConfigureResult(parsed);
+			return parsed;
+		});
 	}
 
 	/** Resolves `folderPath` on Drive and lists flat `.md`/`.txt` files inside it. */
 	async listFiles(req: ListFilesRequest): Promise<ListFilesResult> {
-		const parsed = await this.call('listFiles', req);
-		assertListFilesResult(parsed);
-		this.emitRotatedToken(parsed.rotatedRefreshToken);
-		return parsed;
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const parsed = await invokeJson(state.api, 'listFiles', req);
+			assertListFilesResult(parsed);
+			this.emitRotatedToken(parsed.rotatedRefreshToken);
+			return parsed;
+		});
 	}
 
 	/** Downloads metadata and UTF-8 text content for a Drive file ID. */
 	async readFile(req: ReadFileRequest): Promise<ReadFileResult> {
-		const parsed = await this.call('readFile', req);
-		assertReadFileResult(parsed);
-		this.emitRotatedToken(parsed.rotatedRefreshToken);
-		return parsed;
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const parsed = await invokeJson(state.api, 'readFile', req);
+			assertReadFileResult(parsed);
+			this.emitRotatedToken(parsed.rotatedRefreshToken);
+			return parsed;
+		});
 	}
 
 	/** Creates or updates a flat Drive file directly (used by the Drive browser simulator). */
 	async writeFile(req: WriteFileRequest): Promise<WriteFileResult> {
-		const parsed = await this.call('writeFile', req);
-		assertWriteFileResult(parsed);
-		this.emitRotatedToken(parsed.rotatedRefreshToken);
-		return parsed;
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const parsed = await invokeJson(state.api, 'writeFile', req);
+			assertWriteFileResult(parsed);
+			this.emitRotatedToken(parsed.rotatedRefreshToken);
+			return parsed;
+		});
 	}
 
-	/** Reconciles local, base, and remote Drive content in Go and pushes updates when needed. */
-	async mergeAndPushFile(req: MergeAndPushRequest): Promise<MergeAndPushResult> {
-		const parsed = await this.call('mergeAndPushFile', req);
-		assertMergeAndPushResult(parsed);
-		this.emitRotatedToken(parsed.rotatedRefreshToken);
-		return parsed;
+	/** Forwards Obsidian `create`/`delete`/`modify` notifications to Go's IndexedDB store. */
+	async recordVaultHints(hints: VaultEventHint[]): Promise<void> {
+		if (hints.length === 0) {
+			return;
+		}
+		await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			for (const hint of hints) {
+				await invokeJson(state.api, 'recordVaultEvent', hint);
+			}
+		});
+	}
+
+	/**
+	 * Scans Vault stats via JSPI, compares against IndexedDB, reads only changed/new files via JSPI,
+	 * reconciles Vault+Drive renames and relations into IndexedDB, and returns all `SyncRecord`s.
+	 */
+	async getSyncState(req: GetSyncStateRequest): Promise<GetSyncStateResult> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const startedAt = performance.now();
+			try {
+				const syncBufId = writeStringToGo(
+					state.exports,
+					req.localSyncFolderPath,
+					state.scratchHeaderPtr,
+				);
+				const scanId = await state.promised.collectVaultStats(syncBufId);
+				if (scanId <= 0) {
+					throw new Error(
+						takeLastJspiError(state.exports, state.scratchHeaderPtr, 'Failed to stat Vault folder'),
+					);
+				}
+
+				const prepParsed = await invokeJson(state.api, 'prepareVaultScan', {
+					scanId,
+					driveFolderPath: req.driveFolderPath,
+					localSyncFolderPath: req.localSyncFolderPath,
+					includeDrive: req.includeDrive,
+				});
+				assertPrepareScanResponse(prepParsed);
+
+				if (prepParsed.pathsToRead.length > 0) {
+					const rc = await state.promised.readVaultFilesForScan(scanId);
+					if (rc !== 0) {
+						throw new Error(
+							takeLastJspiError(
+								state.exports,
+								state.scratchHeaderPtr,
+								'Failed to read changed Vault files',
+							),
+						);
+					}
+				}
+
+				const commitParsed = await invokeJson(state.api, 'commitSyncScan', { scanId });
+				assertGetSyncStateResult(commitParsed);
+				this.emitRotatedToken(commitParsed.rotatedRefreshToken);
+				return commitParsed;
+			} finally {
+				this.lastOpDurationMs = Math.round((performance.now() - startedAt) * 100) / 100;
+			}
+		});
+	}
+
+	/**
+	 * Downloads flat files from `driveFolder` in parallel inside Go, updates IndexedDB metadata
+	 * and common bases, and writes/renames files in `syncFolder` via JSPI.
+	 */
+	async pullDriveFolder(driveFolder: string, syncFolder: string): Promise<PullSummary> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const startedAt = performance.now();
+			try {
+				const prepParsed = await invokeJson(state.api, 'pullPrepare', {
+					folderPath: driveFolder,
+				});
+				assertPullPrepareResult(prepParsed);
+				this.emitRotatedToken(prepParsed.rotatedRefreshToken);
+
+				const syncBufId = writeStringToGo(state.exports, syncFolder, state.scratchHeaderPtr);
+				const outBufId = await state.promised.applyPullBatch(
+					prepParsed.batchId,
+					syncBufId,
+					state.scratchHeaderPtr,
+				);
+				if (outBufId <= 0) {
+					throw new Error(
+						takeLastJspiError(state.exports, state.scratchHeaderPtr, 'Failed to apply pull batch'),
+					);
+				}
+				const sumRaw = takePinnedString(state.exports, outBufId, state.scratchHeaderPtr);
+				const sumParsed = JSON.parse(sumRaw) as unknown;
+				assertPullSummary(sumParsed);
+				return sumParsed;
+			} finally {
+				this.lastOpDurationMs = Math.round((performance.now() - startedAt) * 100) / 100;
+			}
+		});
+	}
+
+	/**
+	 * Reads the active local note via JSPI into Go memory, loads the stored common base from
+	 * IndexedDB, runs 3-way merge + Drive update/rename in Go, and updates local Vault via JSPI.
+	 */
+	async pushActiveNote(
+		driveFolder: string,
+		syncFolder: string,
+		fileName: string,
+	): Promise<PushApplySummary> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const startedAt = performance.now();
+			try {
+				const syncBufId = writeStringToGo(state.exports, syncFolder, state.scratchHeaderPtr);
+				const nameBufId = writeStringToGo(state.exports, fileName, state.scratchHeaderPtr);
+
+				const batchId = await state.promised.preparePushInputs(syncBufId, nameBufId);
+				if (batchId <= 0) {
+					throw new Error(
+						takeLastJspiError(
+							state.exports,
+							state.scratchHeaderPtr,
+							'Failed to prepare push inputs',
+						),
+					);
+				}
+
+				const execParsed = await invokeJson(state.api, 'executePreparedPush', {
+					folderPath: driveFolder,
+					batchId,
+				});
+				assertPushExecuteResult(execParsed);
+				this.emitRotatedToken(execParsed.rotatedRefreshToken);
+
+				const outBufId = await state.promised.applyPreparedPush(
+					batchId,
+					state.scratchHeaderPtr,
+				);
+				if (outBufId <= 0) {
+					throw new Error(
+						takeLastJspiError(
+							state.exports,
+							state.scratchHeaderPtr,
+							'Failed to apply push outcome',
+						),
+					);
+				}
+				const sumRaw = takePinnedString(state.exports, outBufId, state.scratchHeaderPtr);
+				const sumParsed = JSON.parse(sumRaw) as unknown;
+				assertPushApplySummary(sumParsed);
+				return sumParsed;
+			} finally {
+				this.lastOpDurationMs = Math.round((performance.now() - startedAt) * 100) / 100;
+			}
+		});
+	}
+
+	/** Reads the stored common base snapshot (if present) for `fileName` from IndexedDB. */
+	async getBaseSnapshot(fileName: string): Promise<BaseSnapshotResult> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const parsed = await invokeJson(state.api, 'getBaseSnapshot', { fileName });
+			assertBaseSnapshotResult(parsed);
+			return parsed;
+		});
+	}
+
+	/** Writes or updates the stored common base snapshot for `fileName` in IndexedDB. */
+	async setBaseSnapshot(fileName: string, content: string): Promise<BaseSnapshotResult> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const parsed = await invokeJson(state.api, 'setBaseSnapshot', { fileName, content });
+			assertBaseSnapshotResult(parsed);
+			return parsed;
+		});
+	}
+
+	/** Removes any stored common base snapshot for `fileName` from IndexedDB. */
+	async clearBaseSnapshot(fileName: string): Promise<BaseSnapshotResult> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const parsed = await invokeJson(state.api, 'clearBaseSnapshot', { fileName });
+			assertBaseSnapshotResult(parsed);
+			return parsed;
+		});
+	}
+
+	/** Executes an IndexedDB write/scan/get/clear benchmark directly via `hack-pad/go-indexeddb`. */
+	async runIdbBenchmark(count = 100): Promise<IDBBenchResult> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const parsed = await invokeJson(state.api, 'runIdbBenchmark', { count });
+			assertIDBBenchResult(parsed);
+			return parsed;
+		});
+	}
+
+	/** Invokes synchronous `reconcileTextDirect` (`//go:wasmexport`) using linear-memory buffers. */
+	async reconcileTextDirect(
+		baseText: string,
+		localText: string,
+		remoteText: string,
+	): Promise<{ outcome: 'clean' | 'folded' | 'keepBoth'; content: string }> {
+		return await this.enqueue(async () => {
+			const state = await this.ensureInitialized();
+			const baseId = writeStringToGo(state.exports, baseText, state.scratchHeaderPtr);
+			const localId = writeStringToGo(state.exports, localText, state.scratchHeaderPtr);
+			const remoteId = writeStringToGo(state.exports, remoteText, state.scratchHeaderPtr);
+			state.exports.reconcileTextDirect(baseId, localId, remoteId, state.mergeHeaderPtr);
+			return takeMergeDirectResult(state.exports, state.mergeHeaderPtr);
+		});
 	}
 
 	/** Shuts down the Go Wasm runtime and removes registered global callbacks. */
@@ -106,19 +400,22 @@ export class GoWasmBridge {
 		this.readyPromise = null;
 	}
 
+	private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+		const next = this.queue.then(fn, fn);
+		this.queue = next.then(
+			() => undefined,
+			() => undefined,
+		);
+		return next;
+	}
+
 	private emitRotatedToken(token: string): void {
 		if (token && this.onRotatedToken) {
 			this.onRotatedToken(token);
 		}
 	}
 
-	private async call(method: string, payload: unknown): Promise<unknown> {
-		const api = await this.ensureInitialized();
-		const rawJson = await api.invoke(method, JSON.stringify(payload));
-		return JSON.parse(rawJson) as unknown;
-	}
-
-	private ensureInitialized(): Promise<WasmBridgeApi> {
+	private ensureInitialized(): Promise<RuntimeState> {
 		if (!this.readyPromise) {
 			this.readyPromise = this.init().catch((err: unknown) => {
 				this.readyPromise = null;
@@ -128,7 +425,9 @@ export class GoWasmBridge {
 		return this.readyPromise;
 	}
 
-	private async init(): Promise<WasmBridgeApi> {
+	private async init(): Promise<RuntimeState> {
+		assertJspiSupported();
+
 		const startedAt = performance.now();
 		const globals = wasmGlobals();
 		const GoCtor = globals.Go;
@@ -137,24 +436,48 @@ export class GoWasmBridge {
 		}
 
 		globals.__testgdocHost = {
-			httpFetch: (req) => executeHttpFetch(req, this.requester),
+			app: this.app,
+			obsidian: this.obsidianHost,
 		};
 
 		const go = new GoCtor();
+		let exportsRef!: WasmJspiExports;
+		go.importObject.obsidianHost = buildObsidianHostImports(
+			() => exportsRef,
+			this.vaultBackend,
+		);
+
 		const result = await WebAssembly.instantiate(
 			wasmBytes as BufferSource,
 			go.importObject,
 		);
+		exportsRef = result.instance.exports as unknown as WasmJspiExports;
+		const promised = bindPromisingExports(exportsRef);
 
 		void go.run(result.instance).catch((err: unknown) => {
 			console.error('Go Wasm runtime exited with error:', err);
 		});
 
 		const api = await waitForBridge(INIT_TIMEOUT_MS);
+		const scratchHeaderPtr = exportsRef.getScratchHeader();
+		const mergeHeaderPtr = exportsRef.getMergeDirectHeader();
+
 		this.lastInitDurationMs = Math.round((performance.now() - startedAt) * 100) / 100;
 		console.warn(`[test-gdoc] Go Wasm initialized in ${this.lastInitDurationMs} ms`);
-		return api;
+
+		return {
+			api,
+			exports: exportsRef,
+			promised,
+			scratchHeaderPtr,
+			mergeHeaderPtr,
+		};
 	}
+}
+
+async function invokeJson(api: WasmBridgeApi, method: string, payload: unknown): Promise<unknown> {
+	const rawJson = await api.invoke(method, JSON.stringify(payload));
+	return JSON.parse(rawJson) as unknown;
 }
 
 async function waitForBridge(timeoutMs: number): Promise<WasmBridgeApi> {
@@ -169,77 +492,4 @@ async function waitForBridge(timeoutMs: number): Promise<WasmBridgeApi> {
 		});
 	}
 	throw new Error('Timed out waiting for Go Wasm bridge initialization');
-}
-
-function asRecord(value: unknown, label: string): Record<string, unknown> {
-	if (typeof value !== 'object' || value === null) {
-		throw new Error(`Go Wasm returned a non-object ${label}`);
-	}
-	return value as Record<string, unknown>;
-}
-
-function assertFileMeta(value: unknown): asserts value is FileMeta {
-	const r = asRecord(value, 'FileMeta');
-	if (
-		typeof r.id !== 'string' ||
-		typeof r.name !== 'string' ||
-		typeof r.mimeType !== 'string' ||
-		typeof r.modifiedTime !== 'string' ||
-		typeof r.size !== 'string'
-	) {
-		throw new Error('Go Wasm returned an unexpected FileMeta shape');
-	}
-}
-
-function assertConfigureResult(value: unknown): asserts value is ConfigureResult {
-	const r = asRecord(value, 'ConfigureResult');
-	if (typeof r.configured !== 'boolean' || typeof r.maxPendingRequests !== 'number') {
-		throw new Error('Go Wasm returned an unexpected ConfigureResult shape');
-	}
-}
-
-function assertListFilesResult(value: unknown): asserts value is ListFilesResult {
-	const r = asRecord(value, 'ListFilesResult');
-	if (
-		typeof r.folderId !== 'string' ||
-		!Array.isArray(r.files) ||
-		typeof r.rotatedRefreshToken !== 'string'
-	) {
-		throw new Error('Go Wasm returned an unexpected ListFilesResult shape');
-	}
-	for (const f of r.files) {
-		assertFileMeta(f);
-	}
-}
-
-function assertReadFileResult(value: unknown): asserts value is ReadFileResult {
-	const r = asRecord(value, 'ReadFileResult');
-	assertFileMeta(r.file);
-	if (typeof r.content !== 'string' || typeof r.rotatedRefreshToken !== 'string') {
-		throw new Error('Go Wasm returned an unexpected ReadFileResult shape');
-	}
-}
-
-function assertWriteFileResult(value: unknown): asserts value is WriteFileResult {
-	const r = asRecord(value, 'WriteFileResult');
-	assertFileMeta(r.file);
-	if (typeof r.rotatedRefreshToken !== 'string') {
-		throw new Error('Go Wasm returned an unexpected WriteFileResult shape');
-	}
-}
-
-function assertMergeAndPushResult(value: unknown): asserts value is MergeAndPushResult {
-	const r = asRecord(value, 'MergeAndPushResult');
-	if (
-		typeof r.outcome !== 'string' ||
-		typeof r.content !== 'string' ||
-		typeof r.remoteContent !== 'string' ||
-		typeof r.remoteExisted !== 'boolean' ||
-		typeof r.driveUpdated !== 'boolean' ||
-		typeof r.localUpdated !== 'boolean' ||
-		typeof r.rotatedRefreshToken !== 'string'
-	) {
-		throw new Error('Go Wasm returned an unexpected MergeAndPushResult shape');
-	}
-	assertFileMeta(r.file);
 }

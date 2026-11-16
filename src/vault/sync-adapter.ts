@@ -1,20 +1,17 @@
 /**
- * Flat-folder vault adapter managing local notes and non-destructive base-snapshot seeding.
+ * Thin Obsidian Vault backend exposing flat-folder stat listing and file I/O primitives
+ * consumed by the JSPI Wasm host bridge. Base storage and sync planning live in Go.
  */
 
-import { type Vault, normalizePath } from 'obsidian';
-
-/** Reference to a flat file inside a vault folder. */
-export interface VaultFileRef {
-	name: string;
-	path: string;
-}
+import { type FileManager, type Vault, normalizePath } from 'obsidian';
+import type { VaultFileStat } from '../settings.generated';
 
 /** Minimal vault abstraction allowing unit tests without full Obsidian mocks. */
 export interface VaultBackend {
-	listFlatFiles(folderPath: string): VaultFileRef[];
+	listFlatStats(folderPath: string): VaultFileStat[];
 	readText(filePath: string): Promise<string | null>;
 	writeText(filePath: string, content: string): Promise<void>;
+	renameFile(oldPath: string, newPath: string): Promise<void>;
 	exists(filePath: string): Promise<boolean>;
 	ensureFolder(folderPath: string): Promise<void>;
 }
@@ -38,37 +35,39 @@ export function joinVaultPath(folderPath: string, fileName: string): string {
 	return normalizePath(`${cleanFolder}/${fileName.trim()}`);
 }
 
-/** Splits `note.md` into `{ stem: 'note', ext: '.md' }`. */
-export function splitFileName(fileName: string): { stem: string; ext: string } {
-	const dot = fileName.lastIndexOf('.');
-	if (dot <= 0) {
-		return { stem: fileName, ext: '' };
-	}
-	return { stem: fileName.slice(0, dot), ext: fileName.slice(dot) };
-}
-
-/** Production `VaultBackend` backed by Obsidian's `Vault` API. */
+/** Production `VaultBackend` backed by Obsidian's `Vault` and optional `FileManager` APIs. */
 export class ObsidianVaultBackend implements VaultBackend {
 	private readonly vault: Vault;
+	private readonly fileManager?: FileManager;
 
-	/** Creates a backend bound to the given Obsidian `Vault`. */
-	constructor(vault: Vault) {
+	/** Creates a backend bound to the given Obsidian `Vault` and optional `FileManager`. */
+	constructor(vault: Vault, fileManager?: FileManager) {
 		this.vault = vault;
+		this.fileManager = fileManager;
 	}
 
-	/** Lists direct non-folder child files in `folderPath`. */
-	listFlatFiles(folderPath: string): VaultFileRef[] {
+	/** Lists direct eligible flat `.md`/`.txt` child file stats in `folderPath`. */
+	listFlatStats(folderPath: string): VaultFileStat[] {
 		const folder = this.vault.getFolderByPath(normalizePath(folderPath.trim()));
 		if (!folder) {
 			return [];
 		}
-		const refs: VaultFileRef[] = [];
+		const stats: VaultFileStat[] = [];
 		for (const child of folder.children) {
-			if (this.vault.getFileByPath(child.path) !== null) {
-				refs.push({ name: child.name, path: child.path });
+			if (!isEligibleFileName(child.name)) {
+				continue;
+			}
+			const file = this.vault.getFileByPath(child.path);
+			if (file !== null) {
+				stats.push({
+					name: file.name,
+					path: file.path,
+					size: file.stat.size,
+					mtimeMs: file.stat.mtime,
+				});
 			}
 		}
-		return refs;
+		return stats;
 	}
 
 	/** Reads UTF-8 text from `filePath`, returning `null` if absent. */
@@ -95,6 +94,24 @@ export class ObsidianVaultBackend implements VaultBackend {
 		await this.vault.create(normalized, content);
 	}
 
+	/** Renames an existing Vault file safely via `FileManager.renameFile` when available. */
+	async renameFile(oldPath: string, newPath: string): Promise<void> {
+		const file = this.vault.getFileByPath(normalizePath(oldPath));
+		if (!file) {
+			return;
+		}
+		const normalizedNew = normalizePath(newPath);
+		const slash = normalizedNew.lastIndexOf('/');
+		if (slash > 0) {
+			await this.ensureFolder(normalizedNew.slice(0, slash));
+		}
+		if (this.fileManager) {
+			await this.fileManager.renameFile(file, normalizedNew);
+			return;
+		}
+		await this.vault.rename(file, normalizedNew);
+	}
+
 	/** Returns `true` if a file exists at `filePath`. */
 	exists(filePath: string): Promise<boolean> {
 		return Promise.resolve(this.vault.getFileByPath(normalizePath(filePath)) !== null);
@@ -114,112 +131,5 @@ export class ObsidianVaultBackend implements VaultBackend {
 				await this.vault.createFolder(current);
 			}
 		}
-	}
-}
-
-/**
- * Coordinates flat `.md`/`.txt` note I/O in `localSyncFolderPath` and non-destructive
- * base-snapshot reads/seeding in `baseSnapshotFolderPath`.
- */
-export class VaultSyncAdapter {
-	private readonly backend: VaultBackend;
-
-	/** Creates a sync adapter backed by `backend`. */
-	constructor(backend: VaultBackend) {
-		this.backend = backend;
-	}
-
-	/** Lists eligible flat `.md`/`.txt` files directly inside `localSyncFolderPath`. */
-	listFlatLocalFiles(localSyncFolderPath: string): VaultFileRef[] {
-		return this.backend
-			.listFlatFiles(localSyncFolderPath)
-			.filter((ref) => isEligibleFileName(ref.name));
-	}
-
-	/** Reads a flat local file inside `localSyncFolderPath`. */
-	async readLocalFile(localSyncFolderPath: string, fileName: string): Promise<string | null> {
-		if (!isEligibleFileName(fileName)) {
-			return null;
-		}
-		return await this.backend.readText(joinVaultPath(localSyncFolderPath, fileName));
-	}
-
-	/** Writes a flat local file inside `localSyncFolderPath`. */
-	async writeLocalFile(localSyncFolderPath: string, fileName: string, content: string): Promise<void> {
-		await this.backend.writeText(joinVaultPath(localSyncFolderPath, fileName), content);
-	}
-
-	/** Reads a user-managed base snapshot from `baseSnapshotFolderPath`, returning `null` if missing. */
-	async readBaseSnapshot(baseSnapshotFolderPath: string, fileName: string): Promise<string | null> {
-		if (!isEligibleFileName(fileName)) {
-			return null;
-		}
-		return await this.backend.readText(joinVaultPath(baseSnapshotFolderPath, fileName));
-	}
-
-	/**
-	 * Seeds missing base snapshots from existing local files in `localSyncFolderPath` on startup.
-	 * Never overwrites an existing file in `baseSnapshotFolderPath`.
-	 */
-	async seedBaseFromLocal(
-		localSyncFolderPath: string,
-		baseSnapshotFolderPath: string,
-	): Promise<number> {
-		const locals = this.listFlatLocalFiles(localSyncFolderPath);
-		let seeded = 0;
-		for (const ref of locals) {
-			const basePath = joinVaultPath(baseSnapshotFolderPath, ref.name);
-			if (await this.backend.exists(basePath)) {
-				continue;
-			}
-			const localContent = await this.backend.readText(ref.path);
-			if (localContent !== null) {
-				await this.backend.writeText(basePath, localContent);
-				seeded++;
-			}
-		}
-		return seeded;
-	}
-
-	/**
-	 * Ensures any missing base snapshot for a file is populated from the local copy if present,
-	 * otherwise from `driveContent`. Never overwrites an existing base snapshot.
-	 */
-	async seedMissingBaseFromDrive(
-		localSyncFolderPath: string,
-		baseSnapshotFolderPath: string,
-		fileName: string,
-		driveContent: string,
-	): Promise<boolean> {
-		if (!isEligibleFileName(fileName)) {
-			return false;
-		}
-		const basePath = joinVaultPath(baseSnapshotFolderPath, fileName);
-		if (await this.backend.exists(basePath)) {
-			return false;
-		}
-		const localContent = await this.readLocalFile(localSyncFolderPath, fileName);
-		await this.backend.writeText(basePath, localContent ?? driveContent);
-		return true;
-	}
-
-	/**
-	 * Writes the remote copy to `<stem> (remote conflict).<ext>` (with numeric suffix if needed)
-	 * inside `localSyncFolderPath` for `keepBoth` outcomes without overwriting the active note.
-	 */
-	async writeConflictCopy(
-		localSyncFolderPath: string,
-		fileName: string,
-		remoteContent: string,
-	): Promise<string> {
-		const { stem, ext } = splitFileName(fileName);
-		let candidate = `${stem} (remote conflict)${ext}`;
-		let counter = 2;
-		while (await this.backend.exists(joinVaultPath(localSyncFolderPath, candidate))) {
-			candidate = `${stem} (remote conflict ${counter})${ext}`;
-			counter++;
-		}
-		await this.writeLocalFile(localSyncFolderPath, candidate, remoteContent);
-		return candidate;
 	}
 }

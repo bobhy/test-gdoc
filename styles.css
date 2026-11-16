@@ -74,3 +74,60 @@
 	color: var(--text-muted);
 	font-size: var(--font-ui-small);
 }
+
+.test-gdoc-sync-table {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+	overflow-y: auto;
+	flex: 1;
+}
+
+.test-gdoc-sync-row {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	padding: 0.5rem;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+}
+
+.test-gdoc-sync-top {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 0.5rem;
+}
+
+.test-gdoc-sync-name {
+	font-weight: 600;
+}
+
+.test-gdoc-sync-meta {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-family: var(--font-monospace);
+}
+
+.test-gdoc-relation {
+	font-size: var(--font-ui-smaller);
+	padding: 0.1rem 0.45rem;
+	border-radius: 999px;
+	background: var(--background-secondary);
+}
+
+.test-gdoc-relation.is-inSync {
+	color: var(--color-green);
+}
+
+.test-gdoc-relation.is-bothModified,
+.test-gdoc-relation.is-localDeleted {
+	color: var(--color-red);
+}
+
+.test-gdoc-relation.is-localModified,
+.test-gdoc-relation.is-remoteModified,
+.test-gdoc-relation.is-localRenamed,
+.test-gdoc-relation.is-remoteRenamed {
+	color: var(--color-orange);
+}

@@ -13,6 +13,7 @@ node_modules
 main.js
 build/
 src/settings.generated.ts
+benchmarks/baseline-main/
 
 # Exclude sourcemaps
 *.map

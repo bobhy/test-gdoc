@@ -24,7 +24,7 @@ const (
 	defaultDriveAPIBase   = "https://www.googleapis.com/drive/v3"
 	defaultDriveUploadAPI = "https://www.googleapis.com/upload/drive/v3"
 	folderMimeType        = "application/vnd.google-apps.folder"
-	fileFields            = "id,name,mimeType,modifiedTime,size"
+	fileFields            = "id,name,mimeType,modifiedTime,size,md5Checksum,sha256Checksum"
 )
 
 // RetryOptions configures exponential backoff retries for transient Drive API errors.
@@ -266,6 +266,30 @@ func (c *Client) UpdateFile(ctx context.Context, fileID, name, content string) (
 	var updated settings.FileMeta
 	if err := json.Unmarshal(respBody, &updated); err != nil {
 		return settings.FileMeta{}, fmt.Errorf("parse updated Drive file: %w", err)
+	}
+	return updated, nil
+}
+
+// RenameFile renames an existing Drive file's metadata without replacing its content.
+func (c *Client) RenameFile(ctx context.Context, fileID, newName string) (settings.FileMeta, error) {
+	payload, err := json.Marshal(map[string]string{
+		"name":     newName,
+		"mimeType": contentMimeType(newName),
+	})
+	if err != nil {
+		return settings.FileMeta{}, err
+	}
+	reqURL := fmt.Sprintf("%s/files/%s?fields=%s", c.apiBase, url.PathEscape(fileID), url.QueryEscape(fileFields))
+	status, respBody, err := c.doAuthenticated(ctx, http.MethodPatch, reqURL, map[string]string{"Content-Type": "application/json"}, payload)
+	if err != nil {
+		return settings.FileMeta{}, err
+	}
+	if err := checkStatus(status, respBody); err != nil {
+		return settings.FileMeta{}, err
+	}
+	var updated settings.FileMeta
+	if err := json.Unmarshal(respBody, &updated); err != nil {
+		return settings.FileMeta{}, fmt.Errorf("parse renamed Drive file: %w", err)
 	}
 	return updated, nil
 }

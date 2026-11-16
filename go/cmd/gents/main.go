@@ -27,7 +27,13 @@ func main() {
 	types := []generatedType{
 		{"PluginSettings", "Settings shared between the Obsidian plugin and Go Wasm code.", reflect.TypeFor[settings.PluginSettings]()},
 		{"FileMeta", "Metadata for a flat Drive file managed by the plugin.", reflect.TypeFor[settings.FileMeta]()},
-		{"ConfigureRequest", "Payload to configure Go-side auth and concurrency limits.", reflect.TypeFor[settings.ConfigureRequest]()},
+		{"DriveFileState", "Google Drive file metadata stored inside IndexedDB.", reflect.TypeFor[settings.DriveFileState]()},
+		{"VaultFileState", "Obsidian Vault file metadata and cached hashes stored inside IndexedDB.", reflect.TypeFor[settings.VaultFileState]()},
+		{"BaseMeta", "Compact checksum/size metadata for an optional stored common base snapshot.", reflect.TypeFor[settings.BaseMeta]()},
+		{"SyncRecord", "Unified per-file synchronization record persisted in IndexedDB.", reflect.TypeFor[settings.SyncRecord]()},
+		{"VaultFileStat", "Lightweight Vault file stat entry used for incremental change detection.", reflect.TypeFor[settings.VaultFileStat]()},
+		{"VaultEventHint", "Lightweight Obsidian vault create/delete/modify notification.", reflect.TypeFor[settings.VaultEventHint]()},
+		{"ConfigureRequest", "Payload to configure Go-side auth, vault DB scope, and concurrency limits.", reflect.TypeFor[settings.ConfigureRequest]()},
 		{"ConfigureResult", "Response reporting active Go-side configuration.", reflect.TypeFor[settings.ConfigureResult]()},
 		{"ListFilesRequest", "Request payload to list flat files in a Drive folder path.", reflect.TypeFor[settings.ListFilesRequest]()},
 		{"ListFilesResult", "Result containing the resolved folder ID and flat Drive files.", reflect.TypeFor[settings.ListFilesResult]()},
@@ -37,6 +43,19 @@ func main() {
 		{"WriteFileResult", "Result containing updated or created Drive file metadata.", reflect.TypeFor[settings.WriteFileResult]()},
 		{"MergeAndPushRequest", "Request payload to reconcile local, base, and remote Drive file versions.", reflect.TypeFor[settings.MergeAndPushRequest]()},
 		{"MergeAndPushResult", "Result of 3-way N-way reconciliation and Drive push.", reflect.TypeFor[settings.MergeAndPushResult]()},
+		{"PullPrepareRequest", "Request payload to download a Drive folder in parallel inside Go.", reflect.TypeFor[settings.PullPrepareRequest]()},
+		{"PullPrepareResult", "Handle and count for downloaded Drive files retained in Go memory.", reflect.TypeFor[settings.PullPrepareResult]()},
+		{"PullSummary", "Summary of files written and IndexedDB records updated by Pull.", reflect.TypeFor[settings.PullSummary]()},
+		{"PushExecuteRequest", "Request payload to reconcile a JSPI-prepared push batch against Drive.", reflect.TypeFor[settings.PushExecuteRequest]()},
+		{"PushExecuteResult", "Lightweight result from Drive reconciliation of a prepared push batch.", reflect.TypeFor[settings.PushExecuteResult]()},
+		{"PushApplySummary", "Summary of local vault updates applied by JSPI after push reconciliation.", reflect.TypeFor[settings.PushApplySummary]()},
+		{"GetSyncStateRequest", "Request to scan Vault/Drive metadata and return IndexedDB sync records.", reflect.TypeFor[settings.GetSyncStateRequest]()},
+		{"GetSyncStateResult", "All IndexedDB SyncRecords along with scan and rename counters.", reflect.TypeFor[settings.GetSyncStateResult]()},
+		{"BaseSnapshotRequest", "Identifies a single common base snapshot in IndexedDB.", reflect.TypeFor[settings.BaseSnapshotRequest]()},
+		{"BaseSnapshotResult", "Stored common base snapshot content and presence flag.", reflect.TypeFor[settings.BaseSnapshotResult]()},
+		{"SetBaseSnapshotRequest", "Updates or seeds a stored common base snapshot in IndexedDB.", reflect.TypeFor[settings.SetBaseSnapshotRequest]()},
+		{"IDBBenchRequest", "Configures an IndexedDB write/scan/get/clear throughput benchmark.", reflect.TypeFor[settings.IDBBenchRequest]()},
+		{"IDBBenchResult", "Measured millisecond timings for Go IndexedDB operations.", reflect.TypeFor[settings.IDBBenchResult]()},
 	}
 
 	var buf bytes.Buffer
@@ -129,6 +148,12 @@ func goTypeToTS(t reflect.Type) (string, error) {
 			return "", fmt.Errorf("slice element: %w", err)
 		}
 		return elemType + "[]", nil
+	case reflect.Pointer:
+		elemType, err := goTypeToTS(t.Elem())
+		if err != nil {
+			return "", fmt.Errorf("pointer element: %w", err)
+		}
+		return elemType + " | null", nil
 	case reflect.Struct:
 		if t.Name() == "" {
 			return "", fmt.Errorf("anonymous structs are not supported")
