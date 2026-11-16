@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0]
 
 ### Added
 - **IndexedDB sync state store**: Per-vault IndexedDB database (`test-gdoc-<slug>`) via `github.com/hack-pad/go-indexeddb/idb` (`sync_records` store with `byDriveFileId` index and `bases` store) tracking Drive metadata, Vault metadata, common base snapshots, and computed sync relations.
@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Hybrid JSPI & single-root host interop**: Migrated Vault I/O and direct merge paths to `//go:wasmimport obsidianHost` + `//go:wasmexport` linear-memory transfers, moved HTTP transport directly onto `obsidian.requestUrl` with `ArrayBuffer`, and serialized all Go Wasm entries through a FIFO mutex.
-- **IndexedDB `GetAll()` scans**: Updated `idbStore.ListRecords` to use `ObjectStore.GetAll()` with a single `JSON.stringify` call instead of cursor iteration (using local `../go-indexeddb` via `replace` in `go.mod`).
+- **IndexedDB `GetAll()` scans**: Updated `idbStore.ListRecords` to use `ObjectStore.GetAll()` with a single `JSON.stringify` call instead of cursor iteration (using PR fork of `go-indexeddb`).
 
 ### Removed
 - **Vault base-snapshot folder**: Removed `BaseSnapshotFolderPath` (`test-gdoc-base`) in favor of storing common base snapshots in IndexedDB.
